@@ -157,7 +157,10 @@ targets: ["localhost:9102"]
 
 # Images from Grafana
 <img width="789" height="331" alt="image" src="https://github.com/user-attachments/assets/fa695a58-cc6e-4991-b807-a906e637ea29" />
-
 <img width="773" height="264" alt="image" src="https://github.com/user-attachments/assets/ecbd47fa-d3ff-4e67-854c-d0811b881d67" />
+<img width="1549" height="301" alt="image" src="https://github.com/user-attachments/assets/1266bd6e-dbef-4d4a-aff3-99c5e446fd78" />
+<img width="1322" height="332" alt="image" src="https://github.com/user-attachments/assets/11ac04c0-f368-4b54-8129-a86b726b4601" />
+
+
 
 
