@@ -109,4 +109,30 @@ datapower_gateway_peering_link_status
 
 datapower_gateway_peering_pending_updates
 
-Caching e performance
+
+# Caching e performance
+
+The exporter uses an internal cache with different TTLs per endpoint:
+
+10s → CPU, memory, TPS, latency
+
+30s → interfaces, API Gateway, HTTP Services, Gateway Peering
+
+60s → filesystem, uptime
+
+120s → ObjectStatus (heavy)
+
+If an endpoint fails, the exporter keeps the previous value.
+
+
+# Logs are sent to stdout and include:
+
+Cycle start
+
+Execution time
+
+Endpoint failures
+
+Cache warnings
+
+Global timeouts
