@@ -58,3 +58,55 @@ List of DataPower appliances
 **user →** Username with read permissions
 
 **password →** Corresponding password
+
+
+
+# The exporter collects global and per‑domain metrics.
+
+**Global metrics:**
+
+datapower_cpu_usage
+
+datapower_memory_total / used / free / pressure
+
+datapower_system_load
+
+datapower_system_worklist
+
+datapower_fs_total_* and datapower_fs_free_*
+
+datapower_interface_status
+
+datapower_interface_rx_bytes
+
+datapower_interface_tx_bytes
+
+**Per‑domain metrics:**
+
+datapower_domain_status
+
+datapower_domainsettings_opstate
+
+datapower_domainsettings_adminstate
+
+datapower_xmlmanager_opstate
+
+datapower_api_gateway_status
+
+datapower_http_service_status
+
+datapower_tps
+
+datapower_http_mean_tx_ms (10s, 1m, 10m, 1h, 1d)
+
+datapower_uptime_seconds
+
+datapower_boot_uptime_seconds
+
+**Gateway Peering:**
+
+datapower_gateway_peering_link_status
+
+datapower_gateway_peering_pending_updates
+
+Caching e performance
