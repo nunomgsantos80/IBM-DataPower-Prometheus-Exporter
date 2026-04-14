@@ -154,3 +154,10 @@ job_name: "datapower"
 static_configs:
 
 targets: ["localhost:9102"]
+
+# Images from Grafana
+<img width="789" height="331" alt="image" src="https://github.com/user-attachments/assets/fa695a58-cc6e-4991-b807-a906e637ea29" />
+
+<img width="773" height="264" alt="image" src="https://github.com/user-attachments/assets/ecbd47fa-d3ff-4e67-854c-d0811b881d67" />
+
+
