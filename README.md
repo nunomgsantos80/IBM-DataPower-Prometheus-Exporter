@@ -1,4 +1,4 @@
-# IBM-DataPower-Prometheus-Exporter
+8# IBM-DataPower-Prometheus-Exporter
 This exporter collects metrics from IBM DataPower appliances through the HTTPS management interface (port 5554) and exposes those metrics on a Prometheus‑compatible HTTP endpoint (/metrics).  It requires no external dependencies and works with Python 3.6.8 or later. All calls are made via curl to ensure compatibility with restricted environments.
 
 Files:
@@ -153,7 +153,7 @@ scrape_configs:
 job_name: "datapower"
 static_configs:
 
-targets: ["localhost:9102"]
+targets: ["localhost:9101"]
 
 # Images from Grafana
 <img width="789" height="331" alt="image" src="https://github.com/user-attachments/assets/fa695a58-cc6e-4991-b807-a906e637ea29" />
