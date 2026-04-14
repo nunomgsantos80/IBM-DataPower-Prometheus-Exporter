@@ -1,0 +1,14 @@
+{
+  "global": {
+    "exporter_port": 9101,
+    "refresh_interval": 15
+  },
+  "appliances": [
+    {
+      "name": "dp1",
+      "host": "10.0.0.10",
+      "user": "admin",
+      "password": "password"
+    }
+  ]
+}
