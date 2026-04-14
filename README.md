@@ -136,3 +136,12 @@ Endpoint failures
 Cache warnings
 
 Global timeouts
+
+# Testing
+curl http://localhost:9101/metrics
+
+You should see metrics such as:
+
+datapower_cpu_usage{appliance="dp1"} 12
+datapower_system_load{appliance="dp1"} 0.42
+datapower_gateway_peering_link_status{appliance="dp1",domain="prod",name="peer1"} 1
