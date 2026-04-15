@@ -163,4 +163,10 @@ targets: ["localhost:9101"]
 
 
 
+# Release Notes — Upcoming Version
+
+**New Feature: Encrypted Password Storage in JSON**
+The next version introduces a significant security enhancement: all passwords stored in the JSON configuration file will now be encrypted.
+This update strengthens credential protection, reduces exposure risks, and aligns the project with best practices for secure configuration management.
+
 
