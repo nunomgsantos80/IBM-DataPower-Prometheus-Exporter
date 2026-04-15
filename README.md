@@ -67,7 +67,7 @@ List of DataPower appliances
 
 datapower_cpu_usage
 
-datapower_memory_total / used / free / pressure
+datapower_memory_total / used / free / pressure / request
 
 datapower_system_load
 
