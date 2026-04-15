@@ -170,4 +170,6 @@ targets: ["localhost:9101"]
 The next version introduces a significant security enhancement: all passwords stored in the JSON configuration file will now be encrypted.
 This update strengthens credential protection, reduces exposure risks, and aligns the project with best practices for secure configuration management.
 
+**Example:**
+<img width="1161" height="168" alt="image" src="https://github.com/user-attachments/assets/2f43e81b-0729-4337-9311-53f756ae51a9" />
 
