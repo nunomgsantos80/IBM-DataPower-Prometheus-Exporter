@@ -190,7 +190,7 @@ The exporter now supports encrypted passwords using AES/Fernet.
 2. Export the key:
    export DP_KEY="your_generated_key"
 
-3. Add the encrypted password to datapowers.json:
+3. Add the encrypted password to **datapowers_secure.json**:
    "password_enc": "gAAAAABl..."
 
 This ensures no plaintext passwords exist in the repository.
