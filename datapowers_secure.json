@@ -1,0 +1,10 @@
+{
+  "global": {
+    "refresh_interval": 25,
+    "exporter_port": 9101
+  },
+  "appliances": [
+    {"name": "DP01", "host": "DP01", "user": "admin", "password_enc": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+    {"name": "DP02", "host": "DP02", "user": "admin", "password_enc": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+  ]
+}
