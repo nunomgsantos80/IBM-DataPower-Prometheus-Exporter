@@ -173,3 +173,26 @@ This update strengthens credential protection, reduces exposure risks, and align
 **Example:**
 <img width="1161" height="168" alt="image" src="https://github.com/user-attachments/assets/2f43e81b-0729-4337-9311-53f756ae51a9" />
 
+## Security: Encrypted Passwords
+
+The exporter now supports encrypted passwords using AES/Fernet.
+
+### How it works
+- A secret key (`DP_KEY`) is stored as an environment variable.
+- Passwords are encrypted once and stored in `datapowers.json` as `password_enc`.
+- The exporter decrypts the password at runtime.
+
+### Steps
+
+1. Generate a key and encrypt a password:
+   python3 encrypt_password.py
+
+2. Export the key:
+   export DP_KEY="your_generated_key"
+
+3. Add the encrypted password to datapowers.json:
+   "password_enc": "gAAAAABl..."
+
+This ensures no plaintext passwords exist in the repository.
+
+
