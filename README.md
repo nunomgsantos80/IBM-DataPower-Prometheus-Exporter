@@ -178,7 +178,7 @@ This update strengthens credential protection, reduces exposure risks, and align
 The exporter now supports encrypted passwords using AES/Fernet.
 
 ### How it works
-- A secret key (`DP_KEY`) is stored as an environment variable.
+- A secret key (`DP_KEY`) is stored as an environment variable. **KEEP THIS KEY to avoid regenerate all process.** In case of an reboot e can use the same DP_KEY without change **JSON FILE**.
 - Passwords are encrypted once and stored in `datapowers_secure.json` as `password_enc`.
 - The exporter decrypts the password at runtime.
 
