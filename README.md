@@ -163,7 +163,7 @@ targets: ["localhost:9101"]
 
 
 
-# Release Notes — Upcoming Version
+# Release Notes — Upcoming Version - v1.0b
 
 **New Feature: Encrypted Password Storage in JSON**
 
