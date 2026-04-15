@@ -63,7 +63,7 @@ List of DataPower appliances
 
 # The exporter collects global and per‑domain metrics.
 
-**Global metrics:**
+### Global metrics:
 
 datapower_cpu_usage
 
@@ -81,7 +81,7 @@ datapower_interface_rx_bytes
 
 datapower_interface_tx_bytes
 
-**Per‑domain metrics:**
+### Per‑domain metrics:
 
 datapower_domain_status
 
@@ -103,7 +103,7 @@ datapower_uptime_seconds
 
 datapower_boot_uptime_seconds
 
-**Gateway Peering:**
+### Gateway Peering:
 
 datapower_gateway_peering_link_status
 
