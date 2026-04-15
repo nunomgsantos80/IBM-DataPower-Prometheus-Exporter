@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from cryptography.fernet import Fernet
 
-CONFIG_FILE = "datapowers_secure.json"
+CONFIG_FILE = "datapowers.json"
 metrics_text = ""
 metrics_lock = threading.Lock()
 
@@ -159,6 +159,12 @@ def generate_metrics(config):
             output.append(f'datapower_memory_free{{appliance="{name}"}} {m.get("FreeMemory", 0)}')
             output.append(f'datapower_memory_pressure{{appliance="{name}"}} {m.get("Usage", 0)}')
 
+            # ====================================================
+            #  ADICIONADO: ReqMemory (modo A → sempre exportado)
+            # ====================================================
+            req = m.get("ReqMemory", 0)
+            output.append(f'datapower_request_memory{{appliance="{name}"}} {req}')
+
         sys_data = cached_fetch(
             f"{name}_system", 10,
             lambda: get_status(dp, "default", "SystemUsage")
@@ -170,7 +176,7 @@ def generate_metrics(config):
                 f'datapower_system_load{{appliance="{name}"}} {sys.get("Load", 0)}'
             )
             output.append(
-                f'datapower_system_worklist{{appliance="{name}"}} {sys.get("Work", 0)}'
+                f'datapower_system_worklist{{appliance="{name}"}} {sys.get("WorkList", 0)}'
             )
 
         fs = cached_fetch(
