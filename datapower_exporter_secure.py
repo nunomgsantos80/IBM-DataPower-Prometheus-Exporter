@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from cryptography.fernet import Fernet
 
-CONFIG_FILE = "datapowers.json"
+CONFIG_FILE = "datapowers_secure.json"
 metrics_text = ""
 metrics_lock = threading.Lock()
 
