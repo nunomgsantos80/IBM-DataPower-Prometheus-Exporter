@@ -159,9 +159,7 @@ def generate_metrics(config):
             output.append(f'datapower_memory_free{{appliance="{name}"}} {m.get("FreeMemory", 0)}')
             output.append(f'datapower_memory_pressure{{appliance="{name}"}} {m.get("Usage", 0)}')
 
-            # ====================================================
-            #  ADICIONADO: ReqMemory (modo A → sempre exportado)
-            # ====================================================
+            # ReqMemory sempre exportado
             req = m.get("ReqMemory", 0)
             output.append(f'datapower_request_memory{{appliance="{name}"}} {req}')
 
@@ -354,10 +352,16 @@ def generate_metrics(config):
                         ("bootuptime2", "datapower_boot_uptime_seconds")
                     ]:
                         txt = d.get(key, "0 days 00:00:00")
-                        m = re.match(r"(\d+)\s+days\s+(\d+):(\d+):(\d+)", txt)
+
+                        # NOVA REGEX ROBUSTA
+                        m = re.search(r"(?:(\d+)\s+days?,\s+)?(\d+):(\d+):(\d+)", txt)
 
                         if m:
-                            days, hours, minutes, seconds = map(int, m.groups())
+                            days = int(m.group(1)) if m.group(1) else 0
+                            hours = int(m.group(2))
+                            minutes = int(m.group(3))
+                            seconds = int(m.group(4))
+
                             sec = days * 86400 + hours * 3600 + minutes * 60 + seconds
 
                             output.append(
