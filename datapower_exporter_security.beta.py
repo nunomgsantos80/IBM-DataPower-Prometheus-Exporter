@@ -43,7 +43,7 @@ def get_password(dp):
     return dp["password"]
 
 # ============================================================
-#  PROMETHEUS LABEL ESCAPING (BULLETPROOF)
+#  PROMETHEUS LABEL ESCAPING
 # ============================================================
 
 def prom_escape(value):
@@ -146,7 +146,8 @@ def get_service_name(entry, domain):
         (entry.get(k) for k in ("proxy", "service", "name") if entry.get(k)),
         domain
     )
-  # ============================================================
+
+# ============================================================
 #  MÉTRICAS
 # ============================================================
 
@@ -198,6 +199,56 @@ def generate_metrics(config):
             )
 
         # ====================================================
+        #  FILESYSTEMSTATUS (REINTEGRADO)
+        # ====================================================
+
+        fs = cached_fetch(
+            f"{name_raw}_fs", 60,
+            lambda: get_status(dp, "default", "FilesystemStatus")
+        )
+
+        if isinstance(fs, dict) and "FilesystemStatus" in fs:
+            f = fs["FilesystemStatus"]
+            output.append(f'datapower_fs_free_encrypted{{appliance="{name}"}} {f.get("FreeEncrypted", 0)}')
+            output.append(f'datapower_fs_total_encrypted{{appliance="{name}"}} {f.get("TotalEncrypted", 0)}')
+            output.append(f'datapower_fs_free_temporary{{appliance="{name}"}} {f.get("FreeTemporary", 0)}')
+            output.append(f'datapower_fs_total_temporary{{appliance="{name}"}} {f.get("TotalTemporary", 0)}')
+            output.append(f'datapower_fs_free_internal{{appliance="{name}"}} {f.get("FreeInternal", 0)}')
+            output.append(f'datapower_fs_total_internal{{appliance="{name}"}} {f.get("TotalInternal", 0)}')
+
+        # ====================================================
+        #  INTERFACES
+        # ====================================================
+
+        iface = cached_fetch(
+            f"{name_raw}_iface", 30,
+            lambda: get_status(dp, "default", "EthernetInterfaceStatus")
+        )
+
+        if isinstance(iface, dict) and "EthernetInterfaceStatus" in iface:
+            for i in iface["EthernetInterfaceStatus"]:
+                if not isinstance(i, dict):
+                    continue
+
+                iname_raw = i.get("Name", "unknown")
+                iname = prom_escape(iname_raw)
+
+                status = 1 if i.get("Status", "").lower() in ["ok", "up"] else 0
+
+                rx = i.get("RxHCBytes") or i.get("RxBytes") or 0
+                tx = i.get("TxHCBytes") or i.get("TxBytes") or 0
+
+                output.append(
+                    f'datapower_interface_status{{appliance="{name}",interface="{iname}"}} {status}'
+                )
+                output.append(
+                    f'datapower_interface_rx_bytes{{appliance="{name}",interface="{iname}"}} {rx}'
+                )
+                output.append(
+                    f'datapower_interface_tx_bytes{{appliance="{name}",interface="{iname}"}} {tx}'
+                )
+
+        # ====================================================
         #  DOMÍNIOS
         # ====================================================
 
@@ -219,6 +270,51 @@ def generate_metrics(config):
             output.append(
                 f'datapower_domain_status{{appliance="{name}",domain="{domain}"}} {op}'
             )
+
+            # ====================================================
+            #  OBJECTSTATUS (DomainSettings + XMLManager)
+            # ====================================================
+
+            obj = cached_fetch(
+                f"{name_raw}_{domain_raw}_objects", 120,
+                lambda: get_status(dp, domain_raw, "ObjectStatus")
+            )
+
+            if isinstance(obj, dict) and "ObjectStatus" in obj:
+
+                # DomainSettings
+                for ds in obj["ObjectStatus"]:
+                    if not isinstance(ds, dict):
+                        continue
+
+                    if ds.get("Class") == "DomainSettings":
+                        ds_name_raw = ds.get("Name", "domain-settings")
+                        ds_name = prom_escape(ds_name_raw)
+
+                        opstate = 1 if ds.get("OpState") == "up" else 0
+                        adminstate = 1 if ds.get("AdminState") == "enabled" else 0
+
+                        output.append(
+                            f'datapower_domainsettings_opstate{{appliance="{name}",domain="{domain}",object="{ds_name}"}} {opstate}'
+                        )
+                        output.append(
+                            f'datapower_domainsettings_adminstate{{appliance="{name}",domain="{domain}",object="{ds_name}"}} {adminstate}'
+                        )
+
+                # XMLManager
+                for xm in obj["ObjectStatus"]:
+                    if not isinstance(xm, dict):
+                        continue
+
+                    if xm.get("Class") == "XMLManager":
+                        xml_name_raw = xm.get("Name", "xml-manager")
+                        xml_name = prom_escape(xml_name_raw)
+
+                        xml_op = 1 if xm.get("OpState") == "up" else 0
+
+                        output.append(
+                            f'datapower_xmlmanager_opstate{{appliance="{name}",domain="{domain}",object="{xml_name}"}} {xml_op}'
+                        )
 
             # ====================================================
             #  TPS UNIVERSAL
@@ -284,7 +380,8 @@ def generate_metrics(config):
                         output.append(
                             f'datapower_http_mean_tx_ms{{appliance="{name}",domain="{domain}",service="{svc}",interval="{lbl}",gateway_type="{gw_type}"}} {entry.get(key, 0)}'
                         )
-                      # ====================================================
+
+            # ====================================================
             #  UPTIME (DEFAULT DOMAIN)
             # ====================================================
 
@@ -300,9 +397,12 @@ def generate_metrics(config):
                         ("bootuptime2", "datapower_boot_uptime_seconds")
                     ]:
                         txt = d.get(key, "0 days 00:00:00")
-                        m = re.match(r"(\d+)\s+days\s+(\d+):(\d+):(\d+)", txt)
+                        m = re.search(r"(?:(\d+)\s+days?,\s+)?(\d+):(\d+):(\d+)", txt)
                         if m:
-                            days, hours, minutes, seconds = map(int, m.groups())
+                            days = int(m.group(1)) if m.group(1) else 0
+                            hours = int(m.group(2))
+                            minutes = int(m.group(3))
+                            seconds = int(m.group(4))
                             sec = days * 86400 + hours * 3600 + minutes * 60 + seconds
                             output.append(
                                 f'{metric}{{appliance="{name}",domain="{domain}"}} {sec}'
@@ -382,4 +482,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
