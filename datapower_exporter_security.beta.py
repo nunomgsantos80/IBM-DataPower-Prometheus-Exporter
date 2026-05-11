@@ -199,7 +199,7 @@ def generate_metrics(config):
             )
 
         # ====================================================
-        #  FILESYSTEMSTATUS (REINTEGRADO)
+        #  FILESYSTEMSTATUS
         # ====================================================
 
         fs = cached_fetch(
@@ -314,6 +314,70 @@ def generate_metrics(config):
 
                         output.append(
                             f'datapower_xmlmanager_opstate{{appliance="{name}",domain="{domain}",object="{xml_name}"}} {xml_op}'
+                        )
+
+            # ====================================================
+            #  APIHTTPConnections (APIC v10)
+            # ====================================================
+
+            apihttp = cached_fetch(
+                f"{name_raw}_{domain_raw}_apihttpconnections", 30,
+                lambda: get_status(dp, domain_raw, "APIHTTPConnections")
+            )
+
+            if isinstance(apihttp, dict) and "APIHTTPConnections" in apihttp:
+                c = apihttp["APIHTTPConnections"]
+
+                metrics_map = {
+                    "requests": [
+                        ("10s", "reqTenSec"),
+                        ("1m", "reqOneMin"),
+                        ("10m", "reqTenMin"),
+                        ("1h", "reqOneHr"),
+                        ("1d", "reqOneDay"),
+                    ],
+                    "reuse": [
+                        ("10s", "reuseTenSec"),
+                        ("1m", "reuseOneMin"),
+                        ("10m", "reuseTenMin"),
+                        ("1h", "reuseOneHr"),
+                        ("1d", "reuseOneDay"),
+                    ],
+                    "create": [
+                        ("10s", "createTenSec"),
+                        ("1m", "createOneMin"),
+                        ("10m", "createTenMin"),
+                        ("1h", "createOneHr"),
+                        ("1d", "createOneDay"),
+                    ],
+                    "return": [
+                        ("10s", "returnTenSec"),
+                        ("1m", "returnOneMin"),
+                        ("10m", "returnTenMin"),
+                        ("1h", "returnOneHr"),
+                        ("1d", "returnOneDay"),
+                    ],
+                    "offer": [
+                        ("10s", "offerTenSec"),
+                        ("1m", "offerOneMin"),
+                        ("10m", "offerTenMin"),
+                        ("1h", "offerOneHr"),
+                        ("1d", "offerOneDay"),
+                    ],
+                    "destroy": [
+                        ("10s", "destroyTenSec"),
+                        ("1m", "destroyOneMin"),
+                        ("10m", "destroyTenMin"),
+                        ("1h", "destroyOneHr"),
+                        ("1d", "destroyOneDay"),
+                    ],
+                }
+
+                for metric_name, intervals in metrics_map.items():
+                    for label, key in intervals:
+                        value = c.get(key, 0)
+                        output.append(
+                            f'datapower_apihttpconnections_{metric_name}{{appliance="{name}",domain="{domain}",interval="{label}"}} {value}'
                         )
 
             # ====================================================
