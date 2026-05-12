@@ -17,7 +17,7 @@ metrics_text = ""
 metrics_lock = threading.Lock()
 
 # ============================================================
-#  LOGGING
+# LOGGING
 # ============================================================
 
 logging.basicConfig(
@@ -27,112 +27,161 @@ logging.basicConfig(
 log = logging.getLogger("datapower_exporter")
 
 # ============================================================
-#  PASSWORD DECRYPTION
+# PASSWORD DECRYPTION
 # ============================================================
 
 def decrypt_password(enc):
     key = os.getenv("DP_KEY")
     if not key:
         raise Exception("DP_KEY environment variable not set")
-    cipher = Fernet(key.encode())
-    return cipher.decrypt(enc.encode()).decode()
+    return Fernet(key.encode()).decrypt(enc.encode()).decode()
 
 def get_password(dp):
-    if "password_enc" in dp:
-        return decrypt_password(dp["password_enc"])
-    return dp["password"]
+    return decrypt_password(dp["password_enc"]) if "password_enc" in dp else dp["password"]
 
 # ============================================================
-#  PROMETHEUS LABEL ESCAPING
+# PROMETHEUS ESCAPING
 # ============================================================
 
-def prom_escape(value):
-    s = str(value)
-    s = s.replace("\\", "\\\\")
-    s = s.replace('"', '\\"')
-    s = s.replace("\n", "\\n")
-    s = s.replace("\r", "\\r")
-    s = s.replace("\t", "\\t")
-    return s
+def prom_escape(v):
+    return (
+        str(v)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 # ============================================================
-#  HTTP SERVER MULTI-THREAD
+# THREAD HTTP SERVER
 # ============================================================
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 # ============================================================
-#  CACHE
+# CIRCUIT BREAKER + BACKPRESSURE
 # ============================================================
 
-cache = {}
+breaker_state = {}
+backpressure_factor = {}
+appliance_host_map = {}
+breaker_lock = threading.Lock()
 
-def cached_fetch(key, ttl, fetch_fn):
-    now = time.time()
-    entry = cache.get(key, {"ts": 0, "data": None})
+CB_FAIL_THRESHOLD = 3
+CB_OPEN_SECONDS = 60
+BP_MAX_FACTOR = 4
 
-    if now - entry["ts"] > ttl:
-        data = fetch_fn()
-        if data is None:
-            log.warning("Falha ao atualizar cache para %s — mantendo valor antigo", key)
-            return entry["data"]
-        cache[key] = {"ts": now, "data": data}
-        return data
-
-    return entry["data"]
-
-# ============================================================
-#  CONFIG
-# ============================================================
-
-def load_config():
+def _extract_host_from_url(url):
     try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    except Exception as e:
-        log.error("Falha ao carregar %s: %s", CONFIG_FILE, e)
-        exit(1)
+        rest = url.split("://", 1)[1]
+        hostport = rest.split("/", 1)[0]
+        host = hostport.split(":", 1)[0]
+        return host
+    except:
+        return None
+
+def _can_call_host(host):
+    if not host:
+        return True
+    now = time.time()
+    with breaker_lock:
+        st = breaker_state.get(host, {"state": "closed", "fail_count": 0, "opened_at": 0})
+        if st["state"] == "open":
+            if now - st["opened_at"] < CB_OPEN_SECONDS:
+                return False
+            st["state"] = "half"
+            breaker_state[host] = st
+        return True
+
+def _on_call_success(host):
+    if not host:
+        return
+    with breaker_lock:
+        st = breaker_state.get(host, {"state": "closed", "fail_count": 0, "opened_at": 0})
+        st["state"] = "closed"
+        st["fail_count"] = 0
+        st["opened_at"] = 0
+        breaker_state[host] = st
+
+        f = backpressure_factor.get(host, 1)
+        if f > 1:
+            f = max(1, f // 2)
+        backpressure_factor[host] = f
+
+def _on_call_failure(host):
+    if not host:
+        return
+    now = time.time()
+    with breaker_lock:
+        st = breaker_state.get(host, {"state": "closed", "fail_count": 0, "opened_at": 0})
+        if st["state"] in ("closed", "half"):
+            st["fail_count"] += 1
+            if st["fail_count"] >= CB_FAIL_THRESHOLD:
+                st["state"] = "open"
+                st["opened_at"] = now
+        breaker_state[host] = st
+
+        f = backpressure_factor.get(host, 1)
+        if f < BP_MAX_FACTOR:
+            f *= 2
+        backpressure_factor[host] = f
+
+def _get_backpressure_factor_for_key(key):
+    name_raw = key.split("_", 1)[0]
+    host = appliance_host_map.get(name_raw)
+    if not host:
+        return 1
+    with breaker_lock:
+        return backpressure_factor.get(host, 1)
 
 # ============================================================
-#  CURL + RETRY
+# CURL ROBUSTO
 # ============================================================
 
 def call_curl_once(url, user, password, timeout=10):
     cmd = [
-        "curl", "-k", "-s",
-        "--max-time", str(timeout),
-        "-u", "{}:{}".format(user, password),
-        "-H", "Accept: application/json",
-        url
+        "curl","-k","-s","--fail","--compressed","--http1.1","--no-buffer",
+        "-H","Accept: application/json",
+        "--connect-timeout","3","--max-time",str(timeout),
+        "-u",f"{user}:{password}", url
     ]
     try:
-        result = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-        data = json.loads(result)
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        data = json.loads(out)
         if not isinstance(data, dict):
-            log.warning("Resposta inválida de %s", url)
             return None
         return data
-    except Exception as e:
-        log.warning("Erro curl %s: %s", url, e)
+    except:
         return None
 
 def call_curl(url, user, password, retries=3, timeout=10):
-    for attempt in range(retries):
+    host = _extract_host_from_url(url)
+
+    if not _can_call_host(host):
+        return None
+
+    for _ in range(retries):
         data = call_curl_once(url, user, password, timeout)
         if data is not None:
+            _on_call_success(host)
             return data
-        time.sleep(0.2 * (2 ** attempt))
-    log.error("Falha definitiva ao chamar %s", url)
+        time.sleep(0.2)
+
+    _on_call_failure(host)
     return None
 
 # ============================================================
-#  HELPERS
+# HELPERS
 # ============================================================
 
 def get_status(dp, domain, endpoint):
-    url = "https://{}:5554/mgmt/status/{}/{}".format(dp["host"], domain, endpoint)
-    return call_curl(url, dp["user"], get_password(dp))
+    return call_curl(
+        f"https://{dp['host']}:5554/mgmt/status/{domain}/{endpoint}",
+        dp["user"],
+        get_password(dp)
+    )
 
 def detect_gateway_type(entry):
     if isinstance(entry, dict) and entry.get("serviceClass") == "apiGateway":
@@ -142,371 +191,269 @@ def detect_gateway_type(entry):
     return "unknown"
 
 def get_service_name(entry, domain):
-    return next(
-        (entry.get(k) for k in ("proxy", "service", "name") if entry.get(k)),
-        domain
-    )
+    return next((entry.get(k) for k in ("proxy","service","name") if entry.get(k)), domain)
+
+UPTIME_RE = re.compile(r"(?:(\d+)\s+days?,?)?\s*(\d+):(\d+):(\d+)")
+
+def parse_uptime_to_seconds(txt):
+    m = UPTIME_RE.search(str(txt).strip())
+    if not m:
+        return 0
+    d = int(m.group(1)) if m.group(1) else 0
+    h, mi, s = map(int, m.group(2,3,4))
+    return d*86400 + h*3600 + mi*60 + s
 
 # ============================================================
-#  MÉTRICAS
+# CACHE + LOCKS
 # ============================================================
+
+cache = {}
+cache_hits = 0
+cache_misses = 0
+stats_lock = threading.Lock()
+
+def cached_fetch(key, ttl, fn):
+    global cache_hits, cache_misses
+
+    eff_ttl = ttl * _get_backpressure_factor_for_key(key)
+    now = time.time()
+    entry = cache.get(key)
+
+    if entry and now - entry["ts"] < eff_ttl:
+        with stats_lock:
+            cache_hits += 1
+        return entry["data"]
+
+    data = fn()
+
+    with stats_lock:
+        cache_misses += 1
+
+    if data is not None:
+        cache[key] = {"ts": now, "data": data}
+
+    return data
+
+# ============================================================
+# METRICS
+# ============================================================
+
+exporter_calls = 0
+exporter_errors = 0
+exporter_cycle_seconds = 0
 
 def generate_metrics(config):
-    output = []
+    global exporter_calls
+
+    out = []
+
+    # ============================================================
+    # LOG ANTIGO — TOTAL DE DATAPOWERS
+    # ============================================================
+    total = len(config["appliances"])
+    log.info(f"A recolher métricas de {total} DataPowers")
 
     for dp in config["appliances"]:
         name_raw = dp["name"]
         name = prom_escape(name_raw)
+        appliance_host_map[name_raw] = dp["host"]
 
-        log.info("Recolhendo métricas de %s", name_raw)
+        # ============================================================
+        # LOG ANTIGO — POR APPLIANCE
+        # ============================================================
+        log.info(f"Recolhendo métricas de {name_raw}")
 
-        # ====================================================
-        #  MÉTRICAS GLOBAIS
-        # ====================================================
+        with stats_lock:
+            exporter_calls += 1
 
-        cpu = cached_fetch(
-            f"{name_raw}_cpu", 10,
-            lambda: get_status(dp, "default", "CPUUsage")
-        )
+        # CPU
+        cpu = cached_fetch(f"{name_raw}_cpu", 10,
+                           lambda: get_status(dp,"default","CPUUsage"))
         if isinstance(cpu, dict):
-            output.append(
-                f'datapower_cpu_usage{{appliance="{name}"}} {cpu.get("CPUUsage", {}).get("oneMinute", 0)}'
-            )
+            out.append(f'datapower_cpu_usage{{appliance="{name}"}} {cpu.get("CPUUsage",{}).get("oneMinute",0)}')
 
-        mem = cached_fetch(
-            f"{name_raw}_memory", 10,
-            lambda: get_status(dp, "default", "MemoryStatus")
-        )
+        # MEMORY
+        mem = cached_fetch(f"{name_raw}_memory", 10,
+                           lambda: get_status(dp,"default","MemoryStatus"))
         if isinstance(mem, dict):
-            m = mem.get("MemoryStatus", {})
-            output.append(f'datapower_memory_total{{appliance="{name}"}} {m.get("TotalMemory", 0)}')
-            output.append(f'datapower_memory_used{{appliance="{name}"}} {m.get("UsedMemory", 0)}')
-            output.append(f'datapower_memory_free{{appliance="{name}"}} {m.get("FreeMemory", 0)}')
-            output.append(f'datapower_memory_pressure{{appliance="{name}"}} {m.get("Usage", 0)}')
-            output.append(f'datapower_request_memory{{appliance="{name}"}} {m.get("ReqMemory", 0)}')
+            m = mem.get("MemoryStatus",{})
+            out.append(f'datapower_memory_total{{appliance="{name}"}} {m.get("TotalMemory",0)}')
+            out.append(f'datapower_memory_used{{appliance="{name}"}} {m.get("UsedMemory",0)}')
+            out.append(f'datapower_memory_free{{appliance="{name}"}} {m.get("FreeMemory",0)}')
+            out.append(f'datapower_memory_pressure{{appliance="{name}"}} {m.get("Usage",0)}')
+            out.append(f'datapower_request_memory{{appliance="{name}"}} {m.get("ReqMemory",0)}')
 
-        sys_data = cached_fetch(
-            f"{name_raw}_system", 10,
-            lambda: get_status(dp, "default", "SystemUsage")
-        )
-        if isinstance(sys_data, dict) and "SystemUsage" in sys_data:
-            sys = sys_data["SystemUsage"]
-            output.append(
-                f'datapower_system_load{{appliance="{name}"}} {sys.get("Load", 0)}'
-            )
-            output.append(
-                f'datapower_system_worklist{{appliance="{name}"}} {sys.get("WorkList", 0)}'
-            )
+        # SYSTEM
+        sysd = cached_fetch(f"{name_raw}_system", 10,
+                            lambda: get_status(dp,"default","SystemUsage"))
+        if isinstance(sysd, dict) and "SystemUsage" in sysd:
+            s = sysd["SystemUsage"]
+            out.append(f'datapower_system_load{{appliance="{name}"}} {s.get("Load",0)}')
+            out.append(f'datapower_system_worklist{{appliance="{name}"}} {s.get("WorkList",0)}')
 
-        # ====================================================
-        #  FILESYSTEMSTATUS
-        # ====================================================
-
-        fs = cached_fetch(
-            f"{name_raw}_fs", 60,
-            lambda: get_status(dp, "default", "FilesystemStatus")
-        )
-
+        # FILESYSTEM
+        fs = cached_fetch(f"{name_raw}_fs", 60,
+                          lambda: get_status(dp,"default","FilesystemStatus"))
         if isinstance(fs, dict) and "FilesystemStatus" in fs:
             f = fs["FilesystemStatus"]
-            output.append(f'datapower_fs_free_encrypted{{appliance="{name}"}} {f.get("FreeEncrypted", 0)}')
-            output.append(f'datapower_fs_total_encrypted{{appliance="{name}"}} {f.get("TotalEncrypted", 0)}')
-            output.append(f'datapower_fs_free_temporary{{appliance="{name}"}} {f.get("FreeTemporary", 0)}')
-            output.append(f'datapower_fs_total_temporary{{appliance="{name}"}} {f.get("TotalTemporary", 0)}')
-            output.append(f'datapower_fs_free_internal{{appliance="{name}"}} {f.get("FreeInternal", 0)}')
-            output.append(f'datapower_fs_total_internal{{appliance="{name}"}} {f.get("TotalInternal", 0)}')
+            out.append(f'datapower_fs_free_encrypted{{appliance="{name}"}} {f.get("FreeEncrypted",0)}')
+            out.append(f'datapower_fs_total_encrypted{{appliance="{name}"}} {f.get("TotalEncrypted",0)}')
+            out.append(f'datapower_fs_free_temporary{{appliance="{name}"}} {f.get("FreeTemporary",0)}')
+            out.append(f'datapower_fs_total_temporary{{appliance="{name}"}} {f.get("TotalTemporary",0)}')
+            out.append(f'datapower_fs_free_internal{{appliance="{name}"}} {f.get("FreeInternal",0)}')
+            out.append(f'datapower_fs_total_internal{{appliance="{name}"}} {f.get("TotalInternal",0)}')
 
-        # ====================================================
-        #  INTERFACES
-        # ====================================================
-
-        iface = cached_fetch(
-            f"{name_raw}_iface", 30,
-            lambda: get_status(dp, "default", "EthernetInterfaceStatus")
-        )
-
+        # INTERFACES
+        iface = cached_fetch(f"{name_raw}_iface", 30,
+                             lambda: get_status(dp,"default","EthernetInterfaceStatus"))
         if isinstance(iface, dict) and "EthernetInterfaceStatus" in iface:
             for i in iface["EthernetInterfaceStatus"]:
                 if not isinstance(i, dict):
                     continue
 
-                iname_raw = i.get("Name", "unknown")
-                iname = prom_escape(iname_raw)
-
-                status = 1 if i.get("Status", "").lower() in ["ok", "up"] else 0
-
+                iname = prom_escape(i.get("Name","unknown"))
+                st = 1 if i.get("Status","").lower() in ("ok","up") else 0
                 rx = i.get("RxHCBytes") or i.get("RxBytes") or 0
                 tx = i.get("TxHCBytes") or i.get("TxBytes") or 0
 
-                output.append(
-                    f'datapower_interface_status{{appliance="{name}",interface="{iname}"}} {status}'
-                )
-                output.append(
-                    f'datapower_interface_rx_bytes{{appliance="{name}",interface="{iname}"}} {rx}'
-                )
-                output.append(
-                    f'datapower_interface_tx_bytes{{appliance="{name}",interface="{iname}"}} {tx}'
-                )
+                out.append(f'datapower_interface_status{{appliance="{name}",interface="{iname}"}} {st}')
+                out.append(f'datapower_interface_rx_bytes{{appliance="{name}",interface="{iname}"}} {rx}')
+                out.append(f'datapower_interface_tx_bytes{{appliance="{name}",interface="{iname}"}} {tx}')
 
-        # ====================================================
-        #  DOMÍNIOS
-        # ====================================================
-
-        domains = cached_fetch(
-            f"{name_raw}_domains", 30,
-            lambda: get_status(dp, "default", "DomainStatus")
-        )
+        # DOMAINS
+        domains = cached_fetch(f"{name_raw}_domains", 60,
+                               lambda: get_status(dp,"default","DomainStatus"))
         if not isinstance(domains, dict):
             continue
 
         for dom in domains.get("DomainStatus", []):
-            if not isinstance(dom, dict):
-                continue
-
-            domain_raw = dom.get("Domain")
+            domain_raw = dom.get("Domain","unknown")
             domain = prom_escape(domain_raw)
 
-            op = 1 if dom.get("OpState", "").lower() == "up" else 0
-            output.append(
-                f'datapower_domain_status{{appliance="{name}",domain="{domain}"}} {op}'
-            )
+            op = 1 if dom.get("OpState","").lower()=="up" else 0
+            out.append(f'datapower_domain_status{{appliance="{name}",domain="{domain}"}} {op}')
 
-            # ====================================================
-            #  OBJECTSTATUS (DomainSettings + XMLManager)
-            # ====================================================
-
-            obj = cached_fetch(
-                f"{name_raw}_{domain_raw}_objects", 120,
-                lambda: get_status(dp, domain_raw, "ObjectStatus")
-            )
-
+            # OBJECT STATUS
+            obj = cached_fetch(f"{name_raw}_{domain_raw}_objects", 120,
+                               lambda: get_status(dp,domain_raw,"ObjectStatus"))
             if isinstance(obj, dict) and "ObjectStatus" in obj:
-
-                # DomainSettings
-                for ds in obj["ObjectStatus"]:
-                    if not isinstance(ds, dict):
+                for item in obj["ObjectStatus"]:
+                    if not isinstance(item, dict):
                         continue
 
-                    if ds.get("Class") == "DomainSettings":
-                        ds_name_raw = ds.get("Name", "domain-settings")
-                        ds_name = prom_escape(ds_name_raw)
+                    cls = item.get("Class")
 
-                        opstate = 1 if ds.get("OpState") == "up" else 0
-                        adminstate = 1 if ds.get("AdminState") == "enabled" else 0
+                    if cls == "DomainSettings":
+                        nm = prom_escape(item.get("Name","domain-settings"))
+                        out.append(f'datapower_domainsettings_opstate{{appliance="{name}",domain="{domain}",object="{nm}"}} {1 if item.get("OpState")=="up" else 0}')
+                        out.append(f'datapower_domainsettings_adminstate{{appliance="{name}",domain="{domain}",object="{nm}"}} {1 if item.get("AdminState")=="enabled" else 0}')
 
-                        output.append(
-                            f'datapower_domainsettings_opstate{{appliance="{name}",domain="{domain}",object="{ds_name}"}} {opstate}'
-                        )
-                        output.append(
-                            f'datapower_domainsettings_adminstate{{appliance="{name}",domain="{domain}",object="{ds_name}"}} {adminstate}'
-                        )
+                    elif cls == "XMLManager":
+                        nm = prom_escape(item.get("Name","xml-manager"))
+                        out.append(f'datapower_xmlmanager_opstate{{appliance="{name}",domain="{domain}",object="{nm}"}} {1 if item.get("OpState")=="up" else 0}')
 
-                # XMLManager
-                for xm in obj["ObjectStatus"]:
-                    if not isinstance(xm, dict):
-                        continue
-
-                    if xm.get("Class") == "XMLManager":
-                        xml_name_raw = xm.get("Name", "xml-manager")
-                        xml_name = prom_escape(xml_name_raw)
-
-                        xml_op = 1 if xm.get("OpState") == "up" else 0
-
-                        output.append(
-                            f'datapower_xmlmanager_opstate{{appliance="{name}",domain="{domain}",object="{xml_name}"}} {xml_op}'
-                        )
-
-            # ====================================================
-            #  APIHTTPConnections (APIC v10)
-            # ====================================================
-
-            apihttp = cached_fetch(
-                f"{name_raw}_{domain_raw}_apihttpconnections", 30,
-                lambda: get_status(dp, domain_raw, "APIHTTPConnections")
-            )
-
+            # APIHTTPConnections
+            apihttp = cached_fetch(f"{name_raw}_{domain_raw}_apihttp", 20,
+                                   lambda: get_status(dp,domain_raw,"APIHTTPConnections"))
             if isinstance(apihttp, dict) and "APIHTTPConnections" in apihttp:
                 c = apihttp["APIHTTPConnections"]
 
-                metrics_map = {
-                    "requests": [
-                        ("10s", "reqTenSec"),
-                        ("1m", "reqOneMin"),
-                        ("10m", "reqTenMin"),
-                        ("1h", "reqOneHr"),
-                        ("1d", "reqOneDay"),
-                    ],
-                    "reuse": [
-                        ("10s", "reuseTenSec"),
-                        ("1m", "reuseOneMin"),
-                        ("10m", "reuseTenMin"),
-                        ("1h", "reuseOneHr"),
-                        ("1d", "reuseOneDay"),
-                    ],
-                    "create": [
-                        ("10s", "createTenSec"),
-                        ("1m", "createOneMin"),
-                        ("10m", "createTenMin"),
-                        ("1h", "createOneHr"),
-                        ("1d", "createOneDay"),
-                    ],
-                    "return": [
-                        ("10s", "returnTenSec"),
-                        ("1m", "returnOneMin"),
-                        ("10m", "returnTenMin"),
-                        ("1h", "returnOneHr"),
-                        ("1d", "returnOneDay"),
-                    ],
-                    "offer": [
-                        ("10s", "offerTenSec"),
-                        ("1m", "offerOneMin"),
-                        ("10m", "offerTenMin"),
-                        ("1h", "offerOneHr"),
-                        ("1d", "offerOneDay"),
-                    ],
-                    "destroy": [
-                        ("10s", "destroyTenSec"),
-                        ("1m", "destroyOneMin"),
-                        ("10m", "destroyTenMin"),
-                        ("1h", "destroyOneHr"),
-                        ("1d", "destroyOneDay"),
-                    ],
+                groups = {
+                    "requests":["reqTenSec","reqOneMin","reqTenMin","reqOneHr","reqOneDay"],
+                    "reuse":["reuseTenSec","reuseOneMin","reuseTenMin","reuseOneHr","reuseOneDay"],
+                    "create":["createTenSec","createOneMin","createTenMin","createOneHr","createOneDay"],
+                    "return":["returnTenSec","returnOneMin","returnTenMin","returnOneHr","returnOneDay"],
+                    "offer":["offerTenSec","offerOneMin","offerTenMin","offerOneHr","offerOneDay"],
+                    "destroy":["destroyTenSec","destroyOneMin","destroyTenMin","destroyOneHr","destroyOneDay"]
                 }
 
-                for metric_name, intervals in metrics_map.items():
-                    for label, key in intervals:
-                        value = c.get(key, 0)
-                        output.append(
-                            f'datapower_apihttpconnections_{metric_name}{{appliance="{name}",domain="{domain}",interval="{label}"}} {value}'
+                intervals = ["10s","1m","10m","1h","1d"]
+
+                for g, keys in groups.items():
+                    for lbl, key in zip(intervals, keys):
+                        out.append(
+                            f'datapower_apihttpconnections_{g}{{appliance="{name}",domain="{domain}",interval="{lbl}"}} {c.get(key,0)}'
                         )
 
-            # ====================================================
-            #  TPS UNIVERSAL
-            # ====================================================
-
-            trx = cached_fetch(
-                f"{name_raw}_{domain_raw}_tps", 10,
-                lambda: get_status(dp, domain_raw, "HTTPTransactions2")
-            )
+            # TPS
+            trx = cached_fetch(f"{name_raw}_{domain_raw}_tps", 10,
+                               lambda: get_status(dp,domain_raw,"HTTPTransactions2"))
             if isinstance(trx, dict) and "HTTPTransactions2" in trx:
-                raw_t = trx["HTTPTransactions2"]
-                gw_type_raw = detect_gateway_type(raw_t)
-                gw_type = prom_escape(gw_type_raw)
+                raw = trx["HTTPTransactions2"]
+                gw = prom_escape(detect_gateway_type(raw))
+                entries = raw if isinstance(raw, list) else [raw]
 
-                if isinstance(raw_t, dict):
-                    entries_t = [raw_t]
-                elif isinstance(raw_t, list):
-                    entries_t = [e for e in raw_t if isinstance(e, dict)]
-                else:
-                    entries_t = []
-
-                for entry in entries_t:
-                    svc_raw = get_service_name(entry, domain_raw)
-                    svc = prom_escape(svc_raw)
-
-                    output.append(
-                        f'datapower_tps{{appliance="{name}",domain="{domain}",service="{svc}",gateway_type="{gw_type}"}} {entry.get("tenSeconds", 0)}'
-                    )
-
-            # ====================================================
-            #  LATÊNCIA UNIVERSAL
-            # ====================================================
-
-            lat = cached_fetch(
-                f"{name_raw}_{domain_raw}_latency", 10,
-                lambda: get_status(dp, domain_raw, "HTTPMeanTransactionTime2")
-            )
-
-            if domain_raw != "default" and isinstance(lat, dict) and "HTTPMeanTransactionTime2" in lat:
-                raw = lat["HTTPMeanTransactionTime2"]
-                gw_type_raw = detect_gateway_type(raw)
-                gw_type = prom_escape(gw_type_raw)
-
-                if isinstance(raw, dict):
-                    entries = [raw]
-                elif isinstance(raw, list):
-                    entries = [e for e in raw if isinstance(e, dict)]
-                else:
-                    entries = []
-
-                for entry in entries:
-                    svc_raw = get_service_name(entry, domain_raw)
-                    svc = prom_escape(svc_raw)
-
-                    for label, key in [
-                        ("10s", "tenSeconds"),
-                        ("1m", "oneMinute"),
-                        ("10m", "tenMinutes"),
-                        ("1h", "oneHour"),
-                        ("1d", "oneDay")
-                    ]:
-                        lbl = prom_escape(label)
-                        output.append(
-                            f'datapower_http_mean_tx_ms{{appliance="{name}",domain="{domain}",service="{svc}",interval="{lbl}",gateway_type="{gw_type}"}} {entry.get(key, 0)}'
+                for e in entries:
+                    if isinstance(e, dict):
+                        svc = prom_escape(get_service_name(e, domain_raw))
+                        out.append(
+                            f'datapower_tps{{appliance="{name}",domain="{domain}",service="{svc}",gateway_type="{gw}"}} {e.get("tenSeconds",0)}'
                         )
 
-            # ====================================================
-            #  UPTIME (DEFAULT DOMAIN)
-            # ====================================================
+            # LATENCY
+            lat = cached_fetch(f"{name_raw}_{domain_raw}_lat", 10,
+                               lambda: get_status(dp,domain_raw,"HTTPMeanTransactionTime2"))
 
-            if domain_raw == "default":
-                dt = cached_fetch(
-                    f"{name_raw}_uptime", 60,
-                    lambda: get_status(dp, "default", "DateTimeStatus")
-                )
-                if isinstance(dt, dict) and "DateTimeStatus" in dt:
-                    d = dt["DateTimeStatus"]
-                    for key, metric in [
-                        ("uptime2", "datapower_uptime_seconds"),
-                        ("bootuptime2", "datapower_boot_uptime_seconds")
-                    ]:
-                        txt = d.get(key, "0 days 00:00:00")
-                        m = re.search(r"(?:(\d+)\s+days?,\s+)?(\d+):(\d+):(\d+)", txt)
-                        if m:
-                            days = int(m.group(1)) if m.group(1) else 0
-                            hours = int(m.group(2))
-                            minutes = int(m.group(3))
-                            seconds = int(m.group(4))
-                            sec = days * 86400 + hours * 3600 + minutes * 60 + seconds
-                            output.append(
-                                f'{metric}{{appliance="{name}",domain="{domain}"}} {sec}'
+            if domain_raw!="default" and isinstance(lat, dict):
+                raw = lat.get("HTTPMeanTransactionTime2")
+
+                if not raw:
+                    log.warning(
+                        "Latência ausente no domínio %s do appliance %s. Resposta DP: %s",
+                        domain_raw, name_raw, lat
+                    )
+                    continue
+
+                gw = prom_escape(detect_gateway_type(raw))
+                entries = raw if isinstance(raw, list) else [raw]
+
+                for e in entries:
+                    if isinstance(e, dict):
+                        svc = prom_escape(get_service_name(e, domain_raw))
+                        for lbl, key in [
+                            ("10s","tenSeconds"),
+                            ("1m","oneMinute"),
+                            ("10m","tenMinutes"),
+                            ("1h","oneHour"),
+                            ("1d","oneDay")
+                        ]:
+                            out.append(
+                                f'datapower_http_mean_tx_ms{{appliance="{name}",domain="{domain}",service="{svc}",interval="{lbl}",gateway_type="{gw}"}} {e.get(key,0)}'
                             )
 
-    return "\n".join(output)
+            # UPTIME
+            if domain_raw=="default":
+                dt = cached_fetch(f"{name_raw}_uptime", 60,
+                                  lambda: get_status(dp,"default","DateTimeStatus"))
+                if isinstance(dt, dict):
+                    d = dt["DateTimeStatus"]
+                    for key, metric in [
+                        ("uptime2","datapower_uptime_seconds"),
+                        ("bootuptime2","datapower_boot_uptime_seconds")
+                    ]:
+                        out.append(
+                            f'{metric}{{appliance="{name}",domain="{domain}"}} {parse_uptime_to_seconds(d.get(key,"0 days 00:00:00"))}'
+                        )
+
+    # METRICAS INTERNAS
+    with stats_lock:
+        out.append(f'datapower_exporter_cache_hits_total {cache_hits}')
+        out.append(f'datapower_exporter_cache_misses_total {cache_misses}')
+        out.append(f'datapower_exporter_calls_total {exporter_calls}')
+        out.append(f'datapower_exporter_errors_total {exporter_errors}')
+        out.append(f'datapower_exporter_cycle_seconds {exporter_cycle_seconds}')
+
+    return "\n".join(out)
 
 # ============================================================
-#  CICLO COM TIMEOUT
-# ============================================================
-
-def run_cycle_with_timeout(config, interval):
-    result = {"done": False}
-
-    def worker():
-        try:
-            data = generate_metrics(config)
-            global metrics_text
-            with metrics_lock:
-                metrics_text = data
-            result["done"] = True
-        except Exception as e:
-            log.error("Erro no ciclo: %s", e)
-
-    t = threading.Thread(target=worker)
-    t.start()
-    t.join(interval * 0.8)
-
-    if not result["done"]:
-        log.warning("Timeout global — mantendo métricas anteriores")
-
-# ============================================================
-#  HTTP SERVER
+# SERVER
 # ============================================================
 
 class MetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/metrics":
             self.send_response(200)
-            self.send_header("Content-type", "text/plain")
+            self.send_header("Content-type","text/plain")
             self.end_headers()
             with metrics_lock:
                 self.wfile.write(metrics_text.encode())
@@ -515,34 +462,43 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 # ============================================================
-#  MAIN LOOP
-# ============================================================
-
-def metrics_updater(config, interval):
-    while True:
-        start = time.time()
-        run_cycle_with_timeout(config, interval)
-        elapsed = time.time() - start
-        log.info("Ciclo concluído em %.2fs", elapsed)
-        time.sleep(max(0, interval - elapsed))
-
-# ============================================================
-#  MAIN
+# MAIN
 # ============================================================
 
 def main():
-    config = load_config()
+    global metrics_text, exporter_cycle_seconds, exporter_errors
+
+    config = json.load(open(CONFIG_FILE))
     port = config["global"]["exporter_port"]
     interval = config["global"]["refresh_interval"]
 
-    log.info("Exporter ativo na porta %s", port)
-    log.info("Monitorizando %s DataPowers", len(config["appliances"]))
+    log.info(f"Exporter ativo na porta {port}")
 
-    t = threading.Thread(target=metrics_updater, args=(config, interval), daemon=True)
-    t.start()
+    def loop():
+        global metrics_text, exporter_cycle_seconds, exporter_errors
 
-    server = ThreadedHTTPServer(("", port), MetricsHandler)
-    server.serve_forever()
+        while True:
+            start = time.time()
+            try:
+                metrics = generate_metrics(config)
+                with metrics_lock:
+                    metrics_text = metrics
+            except Exception as e:
+                with stats_lock:
+                    exporter_errors += 1
+                log.error("Erro no ciclo: %s", e)
+
+            with stats_lock:
+                exporter_cycle_seconds = time.time() - start
+
+            # Log final do ciclo — formato antigo
+            log.info(f"Ciclo concluído em {exporter_cycle_seconds:.2f}s")
+
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+    ThreadedHTTPServer(("", port), MetricsHandler).serve_forever()
 
 if __name__ == "__main__":
     main()
