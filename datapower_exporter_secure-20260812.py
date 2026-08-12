@@ -354,6 +354,20 @@ def _as_dict(value):
         return {}
     return {}
 
+def _dedupe_label(base_label, seen_counts):
+    # FIX: quando o DataPower devolve várias entradas com o mesmo valor
+    # de label (ex: várias linhas de SystemUsage2Table com o mesmo
+    # TaskName, ou DomainsMemoryStatus2 com o mesmo domain repetido),
+    # produzir a mesma série Prometheus mais que uma vez é inválido
+    # (labels duplicados na mesma exposição). Sufixa com um índice
+    # posicional só quando há colisão — o primeiro valor mantém-se
+    # "limpo" (sem sufixo) para não partir dashboards existentes.
+    count = seen_counts.get(base_label, 0)
+    seen_counts[base_label] = count + 1
+    if count == 0:
+        return base_label
+    return f"{base_label}-{count + 1}"
+
 def parse_iso8601_duration(s):
     if not s or not s.startswith("P"):
         return 0
@@ -412,8 +426,10 @@ def collect_extended_metrics(dp, name_raw, name, domain_raw, domain, output):
         host=host
     )
     if isinstance(dmem2, dict) and "DomainsMemoryStatus2" in dmem2:
+        dom_seen = {}
         for item in dmem2["DomainsMemoryStatus2"]:
-            dom = prom_escape(item.get("domain", domain_raw))
+            dom_base = prom_escape(item.get("domain", domain_raw))
+            dom = _dedupe_label(dom_base, dom_seen)
             for key in ["current", "oneMinute", "fiveMinutes", "tenMinutes", "oneHour", "twelveHours", "oneDay"]:
                 output.append(
                     f'datapower_domain_memory2_{key}{{appliance="{name}",domain="{dom}"}} {safe_get(item, key)}'
@@ -440,8 +456,10 @@ def collect_extended_metrics(dp, name_raw, name, domain_raw, domain, output):
         host=host
     )
     if isinstance(sys2, dict) and "SystemUsage2Table" in sys2:
+        task_seen = {}
         for task in sys2["SystemUsage2Table"]:
-            tname = prom_escape(task.get("TaskName", "unknown"))
+            tname_base = prom_escape(task.get("TaskName", "unknown"))
+            tname = _dedupe_label(tname_base, task_seen)
             for key in ["Load", "WorkList", "CPU", "Memory", "FileCount"]:
                 output.append(
                     f'datapower_system_task_{key.lower()}{{appliance="{name}",domain="{domain}",task="{tname}"}} {safe_get(task, key)}'
